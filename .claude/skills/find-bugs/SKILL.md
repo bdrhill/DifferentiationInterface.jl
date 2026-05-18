@@ -44,7 +44,7 @@ Test DifferentiationInterface operators against reference implementations and cr
 
 ## Priority Test Areas
 
-These are known gaps in test coverage - prioritize finding bugs here.
+These are known gaps in test coverage - start here, but also explore other areas.
 **Note:** These are open issues. Do NOT file duplicates. Only comment if you find significant new information not already in the issue body or comments.
 
 1. **Prep reuse at different points** (#1007)
