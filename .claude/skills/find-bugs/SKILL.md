@@ -12,9 +12,10 @@ Test DifferentiationInterface operators against reference implementations and cr
 
 1. **First**, check open issues: `gh issue list --state open`
 2. Write test scripts comparing DI operators against:
-   - Direct backend API calls (e.g., `ForwardDiff.gradient` vs `DI.gradient`)
-   - Cross-backend comparisons (e.g., ForwardDiff vs Zygote results)
-   - Finite differences for ground truth
+   - **Cross-backend comparisons**: Same operator, different backends (e.g., `gradient(f, AutoForwardDiff(), x)` vs `gradient(f, AutoZygote(), x)`)
+   - **Analytical derivatives**: For simple test functions, derive the expected result mathematically
+   - **Finite differences**: Fallback for complex functions where analytical derivatives are tedious
+   - **Do NOT** compare against direct backend API calls (e.g., don't compare `DI.gradient` vs `ForwardDiff.gradient`)
 3. Focus on edge cases not covered by open issues
 4. When a test fails or an error is raised:
    a. Skip if it matches an open issue
@@ -45,25 +46,57 @@ Test DifferentiationInterface operators against reference implementations and cr
 
 ```julia
 using DifferentiationInterface
-using ForwardDiff: ForwardDiff
-using Zygote: Zygote
-using FiniteDifferences
 
-# Reference implementation
-fdm = central_fdm(5, 1)
-
+# Simple function with known analytical derivative
+# f(x) = sum(x.^2), gradient = 2x
 f(x) = sum(abs2, x)
 x = rand(5)
+g_analytical = 2x
 
-# Test gradient across backends
+# Cross-backend comparison
 g_fwd = gradient(f, AutoForwardDiff(), x)
 g_zyg = gradient(f, AutoZygote(), x)
-g_ref = grad(fdm, f, x)[1]
+g_enz = gradient(f, AutoEnzyme(), x)
 
-@assert isapprox(g_fwd, g_ref, rtol=1e-6) "ForwardDiff gradient incorrect"
-@assert isapprox(g_zyg, g_ref, rtol=1e-6) "Zygote gradient incorrect"
-@assert isapprox(g_fwd, g_zyg, rtol=1e-10) "Backend mismatch"
+@assert isapprox(g_fwd, g_analytical, rtol=1e-10) "ForwardDiff gradient incorrect"
+@assert isapprox(g_fwd, g_zyg, rtol=1e-10) "ForwardDiff vs Zygote mismatch"
+@assert isapprox(g_fwd, g_enz, rtol=1e-10) "ForwardDiff vs Enzyme mismatch"
+
+# Operator consistency: gradient should match jacobian' for scalar output
+J = jacobian(f, AutoForwardDiff(), x)
+@assert vec(J) ≈ g_fwd "gradient vs jacobian mismatch"
+
+# Preparation consistency
+prep = prepare_gradient(f, AutoForwardDiff(), x)
+g_with_prep = gradient(f, prep, AutoForwardDiff(), x)
+@assert g_fwd ≈ g_with_prep "with/without prep mismatch"
+
+# value_and_* consistency
+val, g_val = value_and_gradient(f, AutoForwardDiff(), x)
+@assert val ≈ f(x) "value_and_gradient returned wrong value"
+@assert g_val ≈ g_fwd "value_and_gradient returned wrong gradient"
 ```
+
+For complex functions, use finite differences as fallback:
+```julia
+g_fdm = gradient(f, AutoFiniteDifferences(), x)
+@assert isapprox(g_fwd, g_fdm, rtol=1e-6) "Gradient vs finite diff mismatch"
+```
+
+## Mathematical Identities & Consistency Checks
+
+These can catch bugs without needing a reference implementation:
+
+- **Hessian symmetry**: `hessian(f, backend, x)` should be symmetric for scalar-valued functions
+- **Jacobian of linear function**: `jacobian(x -> A * x, backend, x) ≈ A`
+- **Gradient of quadratic**: `gradient(x -> x' * A * x, backend, x) ≈ (A + A') * x`
+- **Pushforward/pullback duality**: For `y = f(x)`, `dot(dy, pushforward(f, backend, x, dx)) ≈ dot(pullback(f, backend, x, dy), dx)`
+- **Operator equivalences**:
+  - `gradient(f, backend, x)` ≈ `vec(jacobian(f, backend, x))` for scalar output
+  - `derivative(f, backend, x)` ≈ `pushforward(f, backend, x, one(x))` for scalar input
+  - `jacobian(f, backend, x)[:, i]` ≈ `pushforward(f, backend, x, e_i)` where `e_i` is i-th basis vector
+- **Value consistency**: `value_and_*(f, ...)` should return exactly `f(x)` as the value
+- **In-place consistency**: `op!(f, result, ...)` should match `op(f, ...)`
 
 ## High-Value Test Areas
 
@@ -89,23 +122,7 @@ g_ref = grad(fdm, f, x)[1]
 - Thread safety violations (concurrent use of same prep)
 
 ### Sparse Differentiation
-```julia
-using SparseConnectivityTracer, SparseMatrixColorings
-
-sparse_backend = AutoSparse(
-    AutoForwardDiff();
-    sparsity_detector=TracerSparsityDetector(),
-    coloring_algorithm=GreedyColoringAlgorithm()
-)
-
-f_sparse(x) = diff(x.^2)
-x = rand(10)
-
-J_sparse = jacobian(f_sparse, sparse_backend, x)
-J_dense = jacobian(f_sparse, AutoForwardDiff(), x)
-
-@assert J_sparse ≈ J_dense "Sparse jacobian incorrect"
-```
+**Do not test sparse differentiation.** Bugs in `AutoSparse` are typically missing overloads in SparseConnectivityTracer.jl, not DifferentiationInterface bugs.
 
 ### Second-Order Operators
 ```julia
