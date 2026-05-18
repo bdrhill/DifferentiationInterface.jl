@@ -25,6 +25,8 @@ Test DifferentiationInterface operators against reference implementations and cr
       - **Bugs** (label "bug", title "Bug:"): Incorrect results, crashes, regressions
       - **Backend issues** (title "Bug(BackendName):"): Backend-specific failures
       - **Include stacktrace**: Add collapsible `<details>` section
+      - **Include disclaimer** at the end of every issue or comment:
+        > 🤖 I am a robot. This is an experiment in agentic bug-catching under the supervision of @adrhill and @gdalle. Contents may be hallucinated.
    d. **Only file bugs, not feature requests**:
       - Wrong derivative values → Bug
       - Crash on supported input types → Bug
@@ -329,4 +331,7 @@ julia> using InteractiveUtils; versioninfo()
 \`\`\`
 
 </details>
+
+---
+🤖 I am a robot. This is an experiment in agentic bug-catching under the supervision of @adrhill and @gdalle. Contents may be hallucinated.
 ```
