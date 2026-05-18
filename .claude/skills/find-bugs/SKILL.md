@@ -42,6 +42,40 @@ Test DifferentiationInterface operators against reference implementations and cr
       - Complex numbers: Non-holomorphic functions
 5. Continue testing other edge cases after filing
 
+## Priority Test Areas
+
+These are known gaps in test coverage - prioritize finding bugs here.
+**Note:** These are open issues. Do NOT file duplicates. Only comment if you find significant new information not already in the issue body or comments.
+
+1. **Prep reuse at different points** (#1007)
+   - Currently DIT prepares at `zero(x)` then runs twice at same `x`
+   - Test: prepare at `x1`, run at `x1`, then run at `x2`
+   - Verify: result at `x2` doesn't depend on `x1`
+   - Verify: after second run, values returned for `x1` weren't mutated/erased
+   - Critical for all operators, especially second-order
+
+2. **Empty/edge-case arrays** (#802)
+   - `Float64[]` behaves inconsistently across backends
+   - ReverseDiff, Mooncake, reverse Enzyme: return `(0.0, [])`
+   - Forward Enzyme: errors (batch size 0)
+   - ForwardDiff `value_and_gradient`: errors (GradientResult)
+   - ForwardDiff `gradient` alone: works
+   - Test all operators with empty and length-1 arrays
+
+3. **Context translation across backends** (#750)
+   - Context handling is backend-specific, may be inconsistent
+   - Test `Constant`, `Cache` with same function across backends
+   - Check that context values are correctly passed/translated
+
+4. **Complex numbers** (#646)
+   - Type restrictions like `M<:(AbstractMatrix{<:Real})` are too strict
+   - Test `ComplexF64` inputs with various operators
+   - Note: sparse differentiation excluded (SparseConnectivityTracer issue)
+
+5. **Generic structs** (#343)
+   - Custom struct inputs instead of arrays
+   - Relevant for deep learning (layers, params)
+
 ## Test Pattern
 
 ```julia
