@@ -76,45 +76,117 @@ These are known gaps in test coverage - prioritize finding bugs here.
    - Custom struct inputs instead of arrays
    - Relevant for deep learning (layers, params)
 
-## Test Pattern
+## Test Patterns
+
+### 1. Prep Reuse at Different Points (Priority #1)
 
 ```julia
 using DifferentiationInterface
 
-# Simple function with known analytical derivative
-# f(x) = sum(x.^2), gradient = 2x
-f(x) = sum(abs2, x)
-x = rand(5)
-g_analytical = 2x
+f(x) = sum(x .^ 3)
+backend = AutoForwardDiff()
 
-# Cross-backend comparison
-g_fwd = gradient(f, AutoForwardDiff(), x)
-g_zyg = gradient(f, AutoZygote(), x)
-g_enz = gradient(f, AutoEnzyme(), x)
+x1 = [1.0, 2.0, 3.0]
+x2 = [4.0, 5.0, 6.0]
 
-@assert isapprox(g_fwd, g_analytical, rtol=1e-10) "ForwardDiff gradient incorrect"
-@assert isapprox(g_fwd, g_zyg, rtol=1e-10) "ForwardDiff vs Zygote mismatch"
-@assert isapprox(g_fwd, g_enz, rtol=1e-10) "ForwardDiff vs Enzyme mismatch"
+# Prepare and run at x1
+prep = prepare_gradient(f, backend, x1)
+g1 = gradient(f, prep, backend, x1)
+g1_copy = copy(g1)
 
-# Operator consistency: gradient should match jacobian' for scalar output
-J = jacobian(f, AutoForwardDiff(), x)
-@assert vec(J) ≈ g_fwd "gradient vs jacobian mismatch"
+# Run at different point x2
+g2 = gradient(f, prep, backend, x2)
 
-# Preparation consistency
-prep = prepare_gradient(f, AutoForwardDiff(), x)
-g_with_prep = gradient(f, prep, AutoForwardDiff(), x)
-@assert g_fwd ≈ g_with_prep "with/without prep mismatch"
+# Verify g2 is correct (analytical: 3x^2)
+@assert g2 ≈ 3 .* x2 .^ 2 "Result at x2 incorrect"
 
-# value_and_* consistency
-val, g_val = value_and_gradient(f, AutoForwardDiff(), x)
-@assert val ≈ f(x) "value_and_gradient returned wrong value"
-@assert g_val ≈ g_fwd "value_and_gradient returned wrong gradient"
+# Verify g1 wasn't mutated by the second call
+@assert g1 ≈ g1_copy "Previous result g1 was mutated!"
+
+# Also test second-order operators
+prep_H = prepare_hessian(f, backend, x1)
+H1 = hessian(f, prep_H, backend, x1)
+H1_copy = copy(H1)
+H2 = hessian(f, prep_H, backend, x2)
+@assert diag(H2) ≈ 6 .* x2 "Hessian at x2 incorrect"
+@assert H1 ≈ H1_copy "Previous Hessian H1 was mutated!"
 ```
 
-For complex functions, use finite differences as fallback:
+### 2. Empty and Edge-Case Arrays
+
 ```julia
-g_fdm = gradient(f, AutoFiniteDifferences(), x)
-@assert isapprox(g_fwd, g_fdm, rtol=1e-6) "Gradient vs finite diff mismatch"
+backends = [AutoForwardDiff(), AutoZygote(), AutoEnzyme()]
+
+# Empty array
+x_empty = Float64[]
+for b in backends
+    try
+        g = gradient(sum, b, x_empty)
+        @assert g == Float64[] "Expected empty gradient"
+    catch e
+        @warn "$(typeof(b)) fails on empty array" exception=e
+    end
+end
+
+# Length-1 array
+x_one = [3.14]
+for b in backends
+    g = gradient(sum, b, x_one)
+    @assert g ≈ [1.0] "Length-1 gradient incorrect for $(typeof(b))"
+end
+```
+
+### 3. Context Translation Across Backends
+
+```julia
+f_ctx(x, c) = c * sum(x .^ 2)  # gradient = 2cx
+x = [1.0, 2.0, 3.0]
+c = 5.0
+
+backends = [AutoForwardDiff(), AutoZygote(), AutoEnzyme()]
+results = Dict()
+
+for b in backends
+    g = gradient(f_ctx, b, x, Constant(c))
+    results[typeof(b)] = g
+end
+
+# All backends should agree
+g_expected = 2 * c .* x
+for (btype, g) in results
+    @assert g ≈ g_expected "Context handling wrong for $btype"
+end
+```
+
+### 4. Complex Numbers
+
+```julia
+f_complex(z) = sum(abs2, z)  # gradient = 2z (holomorphic in real/imag sense)
+z = [1.0 + 2.0im, 3.0 - 1.0im]
+
+backends = [AutoForwardDiff(), AutoZygote()]  # Not all support complex
+for b in backends
+    try
+        g = gradient(f_complex, b, z)
+        @assert g ≈ 2 .* z "Complex gradient incorrect for $(typeof(b))"
+    catch e
+        @warn "$(typeof(b)) fails on complex" exception=e
+    end
+end
+```
+
+### 5. Cross-Backend Comparison
+
+```julia
+f(x) = sum(x .^ 3)
+x = rand(5)
+g_analytical = 3 .* x .^ 2
+
+backends = [AutoForwardDiff(), AutoZygote(), AutoEnzyme(), AutoFiniteDifferences()]
+for b in backends
+    g = gradient(f, b, x)
+    @assert isapprox(g, g_analytical, rtol=1e-6) "$(typeof(b)) gradient incorrect"
+end
 ```
 
 ## Mathematical Identities & Consistency Checks
@@ -203,21 +275,6 @@ backend = AutoReverseDiff(; compile=true)
 ```julia
 # Should fail gracefully with mutation
 f_mutating!(y, x) = (y .= x.^2; nothing)
-```
-
-## Context Testing
-
-```julia
-f(x, c) = c * sum(x.^2)
-x = rand(3)
-
-# Test Constant
-g1 = gradient(f, AutoForwardDiff(), x, Constant(2.0))
-g2 = gradient(x -> f(x, 2.0), AutoForwardDiff(), x)
-@assert g1 ≈ g2 "Constant context failed"
-
-# Test that constant is not differentiated
-# (gradient should be w.r.t. x only)
 ```
 
 ## Issue Format
