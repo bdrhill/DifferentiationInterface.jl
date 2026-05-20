@@ -15,7 +15,8 @@ Test DifferentiationInterface operators against reference implementations and cr
    - **Cross-backend comparisons**: Same operator, different backends (e.g., `gradient(f, AutoForwardDiff(), x)` vs `gradient(f, AutoZygote(), x)`)
    - **Analytical derivatives**: For simple test functions, derive the expected result mathematically
    - **Finite differences**: Fallback for complex functions where analytical derivatives are tedious
-   - **Do NOT** compare against direct backend API calls (e.g., don't compare `DI.gradient` vs `ForwardDiff.gradient`)
+   - **For testing correctness**: Do NOT rely on native backend API as ground truth (e.g., don't assume `ForwardDiff.gradient` is correct)
+   - **For issue triage**: DO compare DI output to native API to help distinguish DI bugs from backend bugs
 3. Focus on edge cases not covered by open issues
 4. When a test fails or an error is raised:
    a. Skip if it matches an open issue
@@ -25,8 +26,9 @@ Test DifferentiationInterface operators against reference implementations and cr
       - **Bugs** (label "bug", title "Bug:"): Incorrect results, crashes, regressions
       - **Backend issues** (title "Bug(BackendName):"): Backend-specific failures
       - **Include stacktrace**: Add collapsible `<details>` section
+      - **Compare to native API**: Test the equivalent native backend call (e.g., `ForwardDiff.gradient`) to distinguish DI bugs from backend bugs
       - **Include disclaimer** at the end of every issue or comment:
-        > 🤖 I am a robot. This is an experiment in agentic bug-catching under the supervision of @adrhill and @gdalle. Contents may be hallucinated.
+        > 🤖 I am a robot. This is an experiment in agentic bug-catching under the supervision of @adrhill and @gdalle ([#1008](https://github.com/gdalle/DifferentiationInterface.jl/issues/1008)). Contents may be hallucinated.
    d. **Only file bugs, not feature requests**:
       - Wrong derivative values → Bug
       - Crash on supported input types → Bug
@@ -77,6 +79,7 @@ These are known gaps in test coverage - start here, but also explore other areas
 5. **Generic structs** (#343)
    - Custom struct inputs instead of arrays
    - Relevant for deep learning (layers, params)
+   - **Note:** FiniteDifferences handles structs/NamedTuples/Tuples naturally; other backends may not
 
 ## Test Patterns
 
@@ -191,6 +194,20 @@ for b in backends
 end
 ```
 
+### 6. Using FiniteDifferences (Import Carefully)
+
+FiniteDifferences exports `jacobian` which conflicts with DI. Use explicit imports:
+
+```julia
+using DifferentiationInterface
+import DifferentiationInterface: gradient, jacobian, hessian, pushforward, pullback
+import DifferentiationInterface: derivative, second_derivative, hvp
+import DifferentiationInterface: prepare_gradient, prepare_jacobian, prepare_hessian
+using FiniteDifferences
+
+backend = AutoFiniteDifferences(FiniteDifferences.central_fdm(5, 1))
+```
+
 ## Mathematical Identities & Consistency Checks
 
 These can catch bugs without needing a reference implementation:
@@ -198,11 +215,11 @@ These can catch bugs without needing a reference implementation:
 - **Hessian symmetry**: `hessian(f, backend, x)` should be symmetric for scalar-valued functions
 - **Jacobian of linear function**: `jacobian(x -> A * x, backend, x) ≈ A`
 - **Gradient of quadratic**: `gradient(x -> x' * A * x, backend, x) ≈ (A + A') * x`
-- **Pushforward/pullback duality**: For `y = f(x)`, `dot(dy, pushforward(f, backend, x, dx)) ≈ dot(pullback(f, backend, x, dy), dx)`
+- **Pushforward/pullback duality**: For `y = f(x)`, `dot(dy, pushforward(f, backend, x, (dx,))[1]) ≈ dot(pullback(f, backend, x, (dy,))[1], dx)` (note: tangents are tuple-wrapped)
 - **Operator equivalences**:
   - `gradient(f, backend, x)` ≈ `vec(jacobian(f, backend, x))` for scalar output
-  - `derivative(f, backend, x)` ≈ `pushforward(f, backend, x, one(x))` for scalar input
-  - `jacobian(f, backend, x)[:, i]` ≈ `pushforward(f, backend, x, e_i)` where `e_i` is i-th basis vector
+  - `derivative(f, backend, x)` ≈ `pushforward(f, backend, x, (one(x),))[1]` for scalar input
+  - `jacobian(f, backend, x)[:, i]` ≈ `pushforward(f, backend, x, (e_i,))[1]` where `e_i` is i-th basis vector
 - **Value consistency**: `value_and_*(f, ...)` should return exactly `f(x)` as the value
 - **In-place consistency**: `op!(f, result, ...)` should match `op(f, ...)`
 
@@ -212,6 +229,7 @@ These can catch bugs without needing a reference implementation:
 - **First-order**: `pushforward`, `pullback`, `derivative`, `gradient`, `jacobian`
 - **Second-order**: `hvp`, `hessian`, `second_derivative`
 - **Variants**: `value_and_*`, `*!` (in-place), with/without preparation
+- **Note:** `pushforward`, `pullback`, and `hvp` take tuple-wrapped tangents: `hvp(f, backend, x, (v,))` not `hvp(f, backend, x, v)`
 
 ### Function Signatures
 - Out-of-place: `f(x) = y`
@@ -228,6 +246,7 @@ These can catch bugs without needing a reference implementation:
 - Reuse after type change (should error or warn)
 - Same-point vs different-point preparation
 - Thread safety violations (concurrent use of same prep)
+- **Note:** Some backends use `NoGradientPrep` (e.g., FiniteDifferences) and don't actually store prep info, so size mismatch won't error
 
 ### Sparse Differentiation
 **Do not test sparse differentiation.** Bugs in `AutoSparse` are typically missing overloads in SparseConnectivityTracer.jl, not DifferentiationInterface bugs.
@@ -311,9 +330,25 @@ What should happen.
 ## Actual Behavior
 What actually happens.
 
+## Native Backend Comparison
+Compare DI output to the equivalent native backend API call to help distinguish DI bugs from backend bugs:
+
+\`\`\`julia
+# DI call
+result_di = gradient(f, AutoForwardDiff(), x)
+
+# Equivalent native call
+result_native = ForwardDiff.gradient(f, x)
+
+# Do they match?
+result_di ≈ result_native  # true → DI correctly wraps backend (bug may be in backend)
+                           # false → DI wrapper has a bug
+\`\`\`
+
 ## Backend
 - Backend: AutoForwardDiff() / AutoZygote() / etc.
 - Works with other backends: Yes/No (list which)
+- Native API gives same result: Yes/No
 
 ## Environment
 - Julia 1.X.Y
@@ -333,5 +368,5 @@ julia> using InteractiveUtils; versioninfo()
 </details>
 
 ---
-🤖 I am a robot. This is an experiment in agentic bug-catching under the supervision of @adrhill and @gdalle. Contents may be hallucinated.
+🤖 I am a robot. This is an experiment in agentic bug-catching under the supervision of @adrhill and @gdalle ([#1008](https://github.com/gdalle/DifferentiationInterface.jl/issues/1008)). Contents may be hallucinated.
 ```
