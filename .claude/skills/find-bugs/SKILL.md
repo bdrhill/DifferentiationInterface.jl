@@ -298,6 +298,24 @@ backend = AutoReverseDiff(; compile=true)
 f_mutating!(y, x) = (y .= x.^2; nothing)
 ```
 
+## Writing Style
+
+Issue and comment text should be neutral and factual. State what happens, what should happen, show an MWE and (where useful) a table of affected cases, and stop there. The same rule applies to follow-up comments: describe behavior and cite references, not impact or sentiment.
+
+Avoid:
+- Charged adjectives: "severely wrong", "silently incorrect", "completely off", "catastrophic", "jarring", "footgun"
+- Assumptions about users: "users have no clue", "user would trust the output", "would surprise users"
+- Emotional intensifiers: "WAY off", "totally", "really", in all caps
+- Phrases that read as complaint or advocacy rather than observation
+- Emoji of any kind in issue bodies, comments, tables, or section headers. The only exception is the robot disclaimer below, which is required verbatim.
+
+Prefer:
+- Plain factual descriptions: "returns values that differ from the analytical answer by ~3x", "disagrees with hessian × v for the same backend"
+- Letting MWEs, tables, and stacktraces do the persuasion
+- Technical precision (cite line numbers, versions, exact error magnitudes) over rhetoric
+
+If a sentence reads like an opinion or a complaint, rewrite it as an observation. A reader should not be able to tell whether the filer was annoyed.
+
 ## Issue Format
 
 ```markdown

@@ -351,8 +351,31 @@ Tested `AutoFiniteDifferences(central_fdm(5, 1))`:
 - No error on mismatch (computed fresh each time)
 - This is expected behavior for FiniteDifferences
 
+### Tracker Tests - All Passed (2026-05-20)
+- gradient, jacobian, pullback, prep reuse, Constant context: all work
+- Float32 type preserved, pushforward/pullback duality holds
+- Empty array works
+- Expected failures: hessian (reverse-only, no nested AD), complex inputs, in-place
+
+### PolyesterForwardDiff Tests - All Passed (2026-05-20)
+- All operators (gradient, jacobian, hessian, hvp, pushforward, derivative): work
+- Different chunk sizes (1, 2, 4, 8, 16): all work
+- Float32, Matrix inputs, stress test (50 prep reuse iterations): work
+- Results match plain ForwardDiff exactly
+
+### FiniteDiff Tests (separate from FiniteDifferences) - 30/31 Passed
+- gradient, jacobian, hessian, derivative, pushforward, prep reuse: work
+- Constant, Cache, multiple contexts: work
+- Empty arrays, Float32, in-place, real→complex: work
+- **hvp FAILS with default settings (Bug #1012)**
+  - `hvp(f, AutoFiniteDiff(), x, v)` returns 3x wrong / sign-flipped values
+  - Caused by forward-over-forward FD numerical instability
+  - Hessian works correctly (uses :hcentral), but HVP uses :forward default
+  - Workaround: `AutoFiniteDiff(fdtype=Val(:central))`
+  - **Filed as #1012**
+
 ### To Test Next
-- Zygote real→complex (blocked by library issues)
-- Mooncake forward mode
+- DifferentiateWith mechanism
+- Diffractor, FastDifferentiation, Symbolics backends
 - GPU array scenarios (if environment supports)
 - ForwardDiff (currently blocked by libquadmath.so.0 missing)
