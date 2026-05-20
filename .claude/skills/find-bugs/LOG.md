@@ -374,8 +374,128 @@ Tested `AutoFiniteDifferences(central_fdm(5, 1))`:
   - Workaround: `AutoFiniteDiff(fdtype=Val(:central))`
   - **Filed as #1012**
 
+### Same-Point Prep Variants (FiniteDiff) - All Passed
+- `prepare_pushforward_same_point` then call with different tangents: ✓
+- `prepare_pullback_same_point` then call with different cotangents: ✓
+- `prepare_hvp_same_point` then call with different v: ✓
+
+### Additional Edge Cases (FiniteDiff central) - All Passed
+- Multi-tangent pushforward `(v1, v2, v3)`: returns tuple of correct length, all components correct
+- Multi-cotangent pullback `(dy1, dy2)`: same
+- Cache context with manual mutation between calls: function-overwritten cache stays correct
+- `Constant` + `Cache` combined: correct
+- Prep reuse with changed `Constant` value: correct (no recomputation needed)
+- Matrix-valued function jacobian: correct
+- Third derivative via nested `derivative` calls: correct
+- Conditional branches (positive/negative): correct on both branches
+- `value_and_pushforward` with matrix output: correct
+- Single-element array: gradient and hessian correct
+
+### AutoFiniteDifferences HVP Cross-Check (2026-05-20) - No Bug
+Compared `hvp` vs `hessian * v` across 4 functions and 7 fdm choices
+(`central_fdm/forward_fdm/backward_fdm` at orders 2, 3, 5):
+- `hvp` and `hessian * v` matched bit-for-bit in every case
+- High-order stencils (3, 5 points): both accurate
+- Low-order stencils (2 points): both equally imprecise (forward `O(1)`,
+  central `O(ε^{1/3})`) — but internally consistent
+- `AutoFiniteDifferences` requires the user to pass an explicit `fdm`, so
+  there is no default-precision footgun analogous to `AutoFiniteDiff`
+- The #1012 inconsistency is specific to `AutoFiniteDiff`'s separate
+  `fdtype` (hvp path) and `fdhtype` (hessian path) defaults
+- Posted as comparison comment on #1012
+
+### HyperHessians Tests (2026-05-20)
+
+**Passed (no bugs):**
+- `hessian`, `hvp`, `second_derivative` correctness vs ForwardDiff: matches to machine precision
+- Prep reuse at different points: result at second point correct, first result not mutated
+- HVP duality (`⟨u,Hv⟩ == ⟨v,Hu⟩`): exact
+- `Constant`, `Cache` contexts (including reused prep with different `Constant` values): work
+- `StaticArrays`: works (returns `MMatrix`)
+- `value_gradient_and_hessian`, `gradient_and_hvp` (and in-place variants): work
+- Chunk size variations (n=7 with chunksize 1..10): all correct
+- Float32, Matrix input, heterogeneous polynomials, mixed-precision: work
+- `prepare_hvp_same_point` lets you change `v` at exec time without re-prep
+- Repeated calls with same prep are deterministic across chunk sweeps
+
+**Bug filed (#1013): hessian/hvp/second_derivative fail when f does not depend on x**
+- `hessian(x -> 42.0, AutoHyperHessians(), x)` → MethodError on `extract_hessian!`
+- `hvp(x -> 42.0, AutoHyperHessians(), x, (v,))` → FieldError on `ϵ12`
+- `second_derivative(x -> 7.0, AutoHyperHessians(), 1.5)` → FieldError on `.v`
+- Also: `f(x, c) = c` with `Constant(42.0)` and `f(x) = exp(0.0)` fail the same way
+- Triggers when `f(x_hyperdual)` evaluates to a plain `Float64` / `Int` without HyperDual propagation
+- Native `HyperHessians.hessian` has the same failure — backend bug, DI correctly wraps
+- Workaround: `f(x) = 0 * x[1] + 42.0` (forces HyperDual propagation)
+- ForwardDiff handles this case, returning zeros
+
+**Known limitation, not filed:**
+- Empty array input (`Float64[]`) raises `ArgumentError: chunk size must be positive, got 0`
+  (same class as #802 — empty-input inconsistency)
+- `value_and_gradient(f, AutoHyperHessians(), x)`: MethodError (HH doesn't define first-order ops)
+- Matrix input + matrix multiplication inside `f`: ambiguous `muladd(::HyperDual, ::HyperDual, ::HyperDual)`
+  (HyperHessians.jl missing method definition)
+- Strict-typed cache `c::Vector{Float64}` rejected by HyperDual cache (expected; user-side restriction)
+
+### FastDifferentiation Tests (2026-05-20)
+
+**Passed:**
+- Basic gradient/jacobian/hessian/hvp on standard polynomials: match ForwardDiff
+- Pushforward/pullback duality: holds
+- Matrix `Constant` context, multiple `Constant` contexts, `Cache` context, `Constant + Cache` mixed: work
+- `Constant` prep reuse with changed value (including matrices): correct
+- `derivative` with vector output, scalar `Number` Constant: work
+- Empty / length-1 arrays: work for `gradient`
+- Matrix input via DI: gradient returns matrix-shape gradient correctly
+
+**Known limitations (not filed):**
+- Tuple / NamedTuple `Constant` (sibling of #775): unchanged — `variablize` only supports `Number` and `AbstractArray`. Maintainer ack'd in #775 as enhancement, not bug.
+- Branching on `Node` value (`if x[1] > 0`): TypeError on boolean conversion — symbolic backends can't trace control flow (expected).
+- Float32 input: gradient preserves type, but jacobian/hessian/derivative-of-vector return Float64 (covered by open #568).
+
+**Bug filed (#1014): hessian returns wrong values when a variable appears inside a nonlinear op and as a multiplier**
+- `hessian(v -> exp(v[1]-v[2])*v[2], AutoFastDifferentiation(), [-0.7, 2.3])`:
+  H[2,2] = 0.129446, correct answer = 0.014936 (off by ~9x, error == `f(x)`)
+- Affected pattern: variable `y` appears inside a nonlinear op `g(...x...y...)` AND as a separate multiplier
+- Verified across operators (`exp`, `sin`, `log`, `^`) and even `(x1-x2)^2*x2` (no transcendental)
+- Native `FastDifferentiation.hessian`, `sparse_hessian`, and `jacobian(jacobian([f], v), v)` all give the same wrong answer
+- Manual `FastDifferentiation.derivative(FastDifferentiation.derivative([f], v[2]), v[2])` gives the correct answer
+- Bug is in the Hessian/Jacobian-of-Jacobian assembly, not the derivative rules themselves
+- Symbolics, HyperHessians match ForwardDiff on the same functions
+- `pushforward`, `jacobian` are correct — only Hessian is wrong
+- `AutoSparse(AutoFastDifferentiation())` inherits the bug
+- Likely related to FastDifferentiation #65 (factorization algorithm)
+
+### Symbolics Tests (2026-05-20)
+
+**Passed:** gradient, hessian, hvp, jacobian, pushforward, pullback, prep reuse with different constants,
+Cache context, vector context, length-1 arrays, matrix input, constant-output functions (returns `[0,0]`),
+the same nonlinear*multiplier functions that break FastDifferentiation.
+
+**Known limitations:**
+- Tuple/NamedTuple `Constant`: ArgumentError (same restriction as FastDifferentiation, see #775).
+- Empty array gradient: `MethodError: no method matching zero(::Type{Any})` at prep stage.
+  Different failure mode from #802 but same class. Maintainer ack'd #802 as low priority.
+
+### DifferentiateWith Tests (2026-05-20)
+
+**Passed:**
+- `DifferentiateWith(f, AutoFiniteDiff())` made differentiable via ForwardDiff, Zygote, Mooncake
+- Vector-valued `f`, scalar input, scalar output, matrix input: all work
+- Multiple uses of the same DW wrapper in one expression: chain rule composes correctly
+- Pushforward, pullback through DW: work
+- Closure over data (warned in docstring): gradient w.r.t. `x` works fine
+- Mooncake DW: scalar / vector inputs and outputs all work
+- Float32 inputs preserved
+- Empty array input: returns empty gradient
+
+**Expected failures (not bugs):**
+- DW with `Constant`/`Cache` context: errors (docstring says contexts unsupported)
+- DW around strict-typed `f(::Vector{Float64})` used in ForwardDiff Hessian or `SecondOrder(FD, X)`: errors because outer Hessian strips one Dual level, leaving inner Duals that the strict signature can't accept. Documented limitation of single-level DW.
+- DW wrapping itself (nested) when the wrapped function is strict-typed: same root cause.
+
 ### To Test Next
-- DifferentiateWith mechanism
-- Diffractor, FastDifferentiation, Symbolics backends
-- GPU array scenarios (if environment supports)
-- ForwardDiff (currently blocked by libquadmath.so.0 missing)
+- Diffractor (forward-mode, less mature than ForwardDiff)
+- GTPSA (TPSA-based backend)
+- GPU array scenarios (if environment supports — blocked locally)
+- ForwardDiff native (currently blocked by libquadmath.so.0 missing)
+- More on `AutoSparse(...)` — see if FastDifferentiation #1014 also leaks into other sparse-backend combinations
