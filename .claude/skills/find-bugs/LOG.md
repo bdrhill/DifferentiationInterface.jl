@@ -493,9 +493,350 @@ the same nonlinear*multiplier functions that break FastDifferentiation.
 - DW around strict-typed `f(::Vector{Float64})` used in ForwardDiff Hessian or `SecondOrder(FD, X)`: errors because outer Hessian strips one Dual level, leaving inner Duals that the strict signature can't accept. Documented limitation of single-level DW.
 - DW wrapping itself (nested) when the wrapped function is strict-typed: same root cause.
 
+### GTPSA Tests (2026-05-20 cont.)
+
+**Passed:**
+- All standard operators on standard functions: gradient, jacobian, hessian, derivative,
+  second_derivative, pushforward, pullback, hvp - match analytical / ForwardDiff
+- Prep reuse at different points (gradient and hessian)
+- Multiple `Constant` contexts, `Constant` prep reuse with changed value
+- Operator equivalences (jacobian columns via pushforward; gradient ≈ vec(jacobian))
+- Hessian symmetry, pushforward/pullback duality
+- Empty array gradient returns `Float64[]`
+- Length-1 array works
+- Float32 input → Float64 gradient (type widening), values correct
+- Matrix input gradient/jacobian, high-dim (n=50)
+- High-order descriptors (order 10)
+- Real → complex: derivative returns `ComplexF64` correctly
+- FastDifferentiation #1014 nonlinear*multiplier hessian pattern: correct
+- Constant + prep reuse with changed value: correct
+
+**Known limitations (documented, not bugs):**
+- `Cache` context: docs explicitly mark `AutoGTPSA` Cache as ❌
+- `pullback`: docs mark `AutoGTPSA` pullback as ❌ (the fallback path returns wrong values for constant f)
+- `SecondOrder(FD, GTPSA)`: `TPS{Dual}` not supported (no constructor for that combination)
+- `SecondOrder(GTPSA, FD)`: extension's pushforward restricts contexts to `Vararg{Constant, C}`, breaks under SecondOrder's `FunctionContext`+`Constant` wrapping
+
+**Bug filed (#1015): gradient/jacobian/hessian/hvp fail and pushforward returns wrong values when f does not depend on x**
+- `gradient(x -> 42.0, AutoGTPSA(), [1.0, 2.0])` → MethodError (`GTPSA.gradient!(::Vector{Float64}, ::Float64)`)
+- `jacobian`/`hessian`/`hvp`/`value_and_gradient`: same MethodError
+- `second_derivative(t -> 42.0, AutoGTPSA(), 1.5)` → BoundsError
+- `pushforward(x -> 42.0, AutoGTPSA(), x, (v,))[1]` returns `42.0` (the value) instead of `0.0`
+- `pushforward(x -> [42.0, 7.0], ...)` returns `[42.0, 7.0]` instead of `[0.0, 0.0]`
+- Root cause: in `onearg.jl`, when `f(xt)` evaluates to plain `Float64` instead of `TPS`,
+  `yt[1]` returns the value (Julia treats Numbers as 1-elem collections) rather than the
+  first-order coefficient
+- Same class as #1013 (HyperHessians) but affects first-order ops and produces silently-wrong
+  pushforward values
+- Workaround: `f(x) = 0 * x[1] + 42.0` forces TPS propagation
+
+### ChainRules Tests (2026-05-20)
+
+**Passed:**
+- gradient, jacobian, pullback, value_and_pullback: match ForwardDiff/Zygote on standard fns
+- Pushforward via fallback works (using pullback inversion)
+- Prep reuse at different points
+- prepare_pullback_same_point with different cotangents
+- Constant context (scalar and array)
+- Matrix input, Float32 (type preserved), BigFloat
+- Pullback duality holds
+- Operator equivalence: gradient ≈ vec(jacobian) for vector-output cases
+- Hessian via `SecondOrder(AutoForwardDiff(), AutoChainRules(...))` works
+- HVP via SecondOrder works
+- Empty array returns `Float64[]`
+- Multiple cotangent pullback returns tuple correctly
+- Constant prep reuse with changed value works
+
+**Known limitations (not bugs):**
+- `Cache` context: docs mark `AutoChainRules` Cache as ❌
+- NamedTuple/Tuple input: returns `Tangent{...}` with un-unthunked inner fields (linked to #343 generic structs)
+- Real → complex jacobian: returns `Matrix{Float64}` (drops imaginary part) — but this is the
+  same Zygote-via-ChainRules limitation as Mooncake (#1010), not a separate bug
+- Scalar-output jacobian: confusing `pick_batchsize` MethodError, but jacobian-on-scalar is
+  user error anyway (ForwardDiff gives a clearer message)
+
+**Bug filed (#1016): gradient/pullback return NoTangent instead of zeros when f does not depend on x**
+- `gradient(x -> 42.0, AutoChainRules(ZygoteRuleConfig()), [1.0, 2.0])` returns
+  `ChainRulesCore.NoTangent()` instead of `[0.0, 0.0]`
+- `pullback`, `value_and_gradient`: same `NoTangent()` returned
+- `jacobian`, `derivative`, `pushforward`: MethodError on `arroftup_to_tupofarr(::Tuple{NoTangent}, ::Float64)`
+- Native `rrule_via_ad` does return `(NoTangent(), NoTangent())` (canonical zero), so the fix is in DI's `unthunk(pb(dy)[2])` path which should convert NoTangent to zeros
+- Same class as #1011 (Zygote `nothing`) but different code path (ChainRulesCoreExt vs ZygoteExt)
+
+### Mooncake Forward Tests (2026-05-20) - All Passed
+Tested `AutoMooncakeForward()` and `AutoMooncakeForward(; config = Mooncake.Config(; friendly_tangents = true))`:
+- gradient, jacobian, derivative, pushforward, pullback (fallback): all correct
+- Prep reuse at different points
+- Constant context, empty array, Float32
+- Pushforward/pullback duality holds
+- **Constant function**: returns zeros correctly (unlike GTPSA, HyperHessians, ChainRules)
+- **Real → complex jacobian**: returns `Matrix{ComplexF64}` correctly (unlike `AutoMooncake` reverse #1010)
+- SecondOrder(AutoMooncakeForward, AutoMooncake) hessian works
+
+### Constant-Function Pattern Cross-Backend Summary
+| Backend | gradient | pullback | pushforward | jacobian | hessian | derivative s→s |
+|---|---|---|---|---|---|---|
+| ForwardDiff | ✓ zeros | ✓ zeros | ✓ 0 | ✓ zeros | ✓ zeros | ✓ 0 |
+| FiniteDiff | ✓ zeros | ✓ zeros | ✓ 0 | conf. err* | ✓ zeros | ✓ 0 |
+| Zygote | ✗ nothing #1011 | ✗ nothing #1011 | MethodError | ✓ zeros | n/a | MethodError #1011 |
+| ChainRules | ✗ NoTangent #1016 | ✗ NoTangent #1016 | MethodError #1016 | MethodError #1016 | n/a | MethodError #1016 |
+| GTPSA | MethodError #1015 | wrong value | wrong value #1015 | MethodError #1015 | MethodError #1015 | wrong value #1015 |
+| Mooncake reverse | TBD | TBD | n/a | TBD | n/a | TBD |
+| Mooncake forward | ✓ zeros | ✓ zeros | ✓ 0 | ✓ zeros | n/a | ✓ 0 |
+| HyperHessians | n/a | n/a | n/a | n/a | MethodError #1013 | FieldError #1013 |
+
+*FiniteDiff scalar-output `jacobian` errors with `similar(::Float64)`. Jacobian-on-scalar is
+user error across all backends, but error message clarity differs.
+
+### Other Tests (2026-05-20) - All Passed
+- BigFloat: ForwardDiff + Zygote gradient/hessian preserve type, values correct
+- Float16: ForwardDiff gradient preserves type, values correct
+- Rational{Int}: ForwardDiff gradient returns `Vector{Rational{Int64}}` correctly
+- gradient! with Float32 buffer + Float64 input: both ForwardDiff and Zygote downcast cleanly
+- gradient! with wrong-size buffer: ForwardDiff truncates silently (LOG-documented),
+  Zygote raises BoundsError
+- jacobian! with wrong-size matrix: DimensionMismatch (good)
+- ForwardDiff chunksize > length: clear ArgumentError from ForwardDiff itself (not DI)
+
+### Summary of Bugs Found (Total)
+1. **#1009** - ForwardDiff real→complex returns `Complex{Dual}` instead of `ComplexF64`
+2. **#1010** - Mooncake jacobian for real→complex returns `Float64` instead of `ComplexF64`
+3. **#1011** - Zygote extension fails when native Zygote returns `nothing` gradient
+4. **#1012** - FiniteDiff hvp under default `fdtype=Val(:forward)` disagrees with hessian
+5. **#1013** - HyperHessians hessian/hvp/second_derivative fail when f does not depend on x
+6. **#1014** - FastDifferentiation hessian wrong when variable appears in nonlinear op AND as multiplier
+7. **#1015** - GTPSA gradient/jacobian/hessian/hvp fail and pushforward returns wrong values when f does not depend on x
+8. **#1016** - ChainRules gradient/pullback return NoTangent instead of zeros when f does not depend on x
+9. **#1017** - `SecondOrder(AutoForwardDiff(), AutoEnzyme(Reverse))` silently returns 0 from `second_derivative`
+10. **#1018** - `SecondOrder(AutoEnzyme(Forward), AutoForwardDiff())` returns wrong hessian/hvp (bug in native Enzyme.Forward over ForwardDiff)
+
+## 2026-05-20 (continued)
+
+### Mooncake Reverse on Constant Functions - All Passed
+Fills the TBD row in the constant-function cross-backend summary:
+- gradient(x -> 42.0): [0.0, 0.0] ✓
+- pullback: ([0.0, 0.0],) ✓
+- jacobian(x -> [42.0, 7.0]): zeros ✓
+- value_and_gradient, derivative, pushforward: all correct ✓
+- f(x) = length(x) (no dep on x): zeros ✓
+- (x, c) -> c with Constant: zeros ✓
+
+### Enzyme on Constant Functions - Mostly Passed
+- `AutoEnzyme()` (default), `AutoEnzyme(Reverse)`: all operators (gradient, pullback, pushforward, jacobian, derivative, hessian, second_derivative) return correct zeros for constant functions
+- `AutoEnzyme(Forward)`: most pass, but **hessian fails** with EnzymeRuntimeException — fails for ALL functions, not just constants (forward-over-forward through `make_context_shadows` hits `jl_f__compute_sparams` which Enzyme.Forward cannot handle). Documented limitation: "many backend combinations will fail".
+
+### ReverseDiff Exotic Types - All Passed
+With both `AutoReverseDiff()` and `AutoReverseDiff(compile=true)`:
+- BigFloat: gradient, hessian, jacobian all correct, preserves BigFloat
+- Float32, Float16, Rational{Int}, Int: gradients correct, type preserved
+- Mixed precision pushforward (BigFloat input, Float64 tangent): widens correctly
+- BigFloat pullback: correct
+
+### AutoSparse(AutoFastDifferentiation) - Inherits #1014
+Confirmed #1014 buggy hessian also returned by `AutoSparse(AutoFastDifferentiation())`:
+- Both dense and sparse return `H_correct[1,2]` correctly, but `H[2,2]` is wrong by ~9x for `exp(v[1]-v[2])*v[2]`
+- Jacobian-of-jacobian via explicit gradient gives the correct answer
+- Already noted in #1014; sparse path doesn't introduce a new failure
+
+### Multi-tangent pushforward/pullback - Working Across Backends
+- 3-tangent pushforward, 2-cotangent pullback: AutoForwardDiff, AutoZygote return correct tuples
+- HVP with 2-tangent tuple: ForwardDiff, Zygote, SecondOrder(FD, Zygote) all match
+
+### SecondOrder Combinations Filed
+- **#1017**: `SecondOrder(FD, Enzyme(Reverse)) second_derivative` always 0.0 (silent)
+  - Inner `derivative(t -> t^4, Enzyme.Reverse, Dual(1.5, 1.0))` returns `Dual(13.5, 0.0)` (partial silently dropped)
+  - Compare: `AutoZygote` and `AutoForwardDiff` inner return `Dual(13.5, 27.0)`
+  - This is the doc-recommended forward-over-reverse pattern — silent wrong is bad UX
+  - Hessian/HVP with same combo fail loudly (Enzyme rejects Dual return)
+- **#1018**: `SecondOrder(Enzyme(Forward), FD) hessian/hvp` returns `H_correct + gradient[i]·ones(1,n)`
+  - Pattern of wrong values: each column = correct + inner_gradient
+  - Reproduces in native `Enzyme.jacobian(Forward, ::, x)` applied to `x -> ForwardDiff.gradient(f, x)` — upstream Enzyme bug
+  - DI correctly wraps the broken native call
+- Combinations that work: SecondOrder(FD, FD), SecondOrder(FD, Zygote), SecondOrder(Enzyme(Reverse), Enzyme(Reverse)), SecondOrder(Enzyme(Forward), Enzyme(Reverse))
+
+### Constant-Function Cross-Backend Summary (updated)
+| Backend | gradient | pullback | pushforward | jacobian | hessian | derivative s→s |
+|---|---|---|---|---|---|---|
+| ForwardDiff | ✓ zeros | ✓ zeros | ✓ 0 | ✓ zeros | ✓ zeros | ✓ 0 |
+| FiniteDiff | ✓ zeros | ✓ zeros | ✓ 0 | conf. err* | ✓ zeros | ✓ 0 |
+| Zygote | ✗ nothing #1011 | ✗ nothing #1011 | MethodError | ✓ zeros | n/a | MethodError #1011 |
+| ChainRules | ✗ NoTangent #1016 | ✗ NoTangent #1016 | MethodError #1016 | MethodError #1016 | n/a | MethodError #1016 |
+| GTPSA | MethodError #1015 | wrong value | wrong value #1015 | MethodError #1015 | MethodError #1015 | wrong value #1015 |
+| Mooncake reverse | ✓ zeros | ✓ zeros | ✓ 0 | ✓ zeros | n/a | ✓ 0 |
+| Mooncake forward | ✓ zeros | ✓ zeros | ✓ 0 | ✓ zeros | n/a | ✓ 0 |
+| HyperHessians | n/a | n/a | n/a | n/a | MethodError #1013 | FieldError #1013 |
+| Enzyme (default/Reverse) | ✓ zeros | ✓ zeros | ✓ 0 | ✓ zeros | ✓ zeros | ✓ 0 |
+| Enzyme (Forward) | ✓ zeros | ✓ zeros | ✓ 0 | ✓ zeros | EnzymeRuntimeErr** | ✓ 0 |
+
+*FiniteDiff scalar-output `jacobian` errors with `similar(::Float64)`. Jacobian-on-scalar is
+user error across all backends, but error message clarity differs.
+**Enzyme(Forward) hessian fails for ALL functions, not just constants.
+
+### Mooncake SecondOrder Combinations - All Loud
+- `AutoMooncake` (reverse-only) hessian/hvp: ArgumentError "Reverse-over-reverse not supported"
+- `AutoMooncake` second_derivative: ArgumentError "bitcast to differentiable type" (Mooncake explicitly guards against silently dropping tangents)
+- `AutoMooncakeForward` hessian/hvp/sd: MissingIntrinsicWrapperException atomic_pointerref (Mooncake forward-over-forward limitation)
+- `SecondOrder(MooncakeForward, Mooncake)` hessian/hvp: ✓ ok ; second_derivative: bitcast error
+- `SecondOrder(MooncakeForward, ForwardDiff)`: all ops ✓ ok
+- `SecondOrder(FD, Mooncake)`: ValueAndGradientReturnTypeError (the IEEEFloat-only check guards correctness)
+- `SecondOrder(FD, MooncakeForward)`: Tangent type mismatch
+- `SecondOrder(MooncakeForward, MooncakeForward)`: atomic_pointerref errors
+- **Note**: Mooncake's explicit "bitcast risks dropping tangents" / "primal must be IEEEFloat" checks deliberately prevent the kind of silent-zero bug we filed for Enzyme (#1017). No new bugs.
+
+### AutoSparse(MixedMode) Jacobian - All Passed
+- `AutoSparse(MixedMode(AutoForwardDiff(), AutoMooncake()))` on bordered Jacobian (one dense row + diagonal): correct matrix
+- Sanity: dense AutoForwardDiff, AutoSparse(AutoForwardDiff), AutoSparse(AutoMooncake) all match
+- Tall (10×3) Jacobian matches ForwardDiff reference
+
+### Buffer Aliasing / Unusual Buffers - All Correct
+- `gradient!(f, x, backend, x)` aliasing (same array as buffer and input): gives correct result for FD and ReverseDiff
+- SubArray as gradient buffer: works
+- SVector as buffer: errors properly ("setindex! not defined")
+- MVector input → MVector output (FD)
+- Transpose buffer: works
+- Wider output buffer (Float64 buf, Float32 input): widens correctly
+- SubArray Hessian buffer (view(big_buf, 2:4, 2:4)): works
+- SubArray input: works without mutating original
+
+### Size Mismatch / Wrong Shapes - All Loud
+- Wrong-size pushforward tangent: DimensionMismatch for FD and ReverseDiff
+- Wrong-size pullback cotangent: DimensionMismatch
+- `hessian` of vector-output f: DimensionMismatch with helpful "expects scalar" message (FD); shape error (ReverseDiff)
+- `gradient` of vector-output f: same as above
+- `gradient` of tuple-output f: same
+- `derivative` on vector input: MethodError "no method matching one(::Vector)"
+- `jacobian` on scalar input: DimensionMismatch with helpful "expects array" message
+- Pushforward prep with wrong tangent size, then call with different size: DimensionMismatch
+
+### Combined Operators - All Consistent
+For both AutoForwardDiff and AutoReverseDiff:
+- `value_gradient_and_hessian` returns matching y/g/H
+- `value_and_gradient`, `gradient_and_hvp`, `value_and_jacobian`, `value_derivative_and_second_derivative`: all consistent
+- `value_gradient_and_hessian!` in-place: matches out-of-place
+- `value_and_gradient` matches separate `value(f, x)` + `gradient`
+
+### AutoSparse Hessian Cross-Backend - All Passed
+- Diagonal Hessian (`sum(x.^3)`): `AutoSparse(FD)`, `AutoSparse(RD)`, `AutoSparse(SecondOrder(FD,FD))`, `AutoSparse(SecondOrder(FD,RD))` all correct
+- Tridiagonal Hessian: same — all correct
+- Sparse hessian prep reuse at different points: correct, prior result not mutated
+
+### Exotic Constant Types - All Passed
+Tested with `AutoForwardDiff`, `AutoReverseDiff`, and `AutoMooncake`:
+- `Constant{Function}` (e.g., `sin`): correct gradients
+- `Constant{Symbol}` (used in control flow): correct
+- `Constant{NamedTuple}`, `Constant{Tuple}`: correct
+- `Constant{Int}` controlling exponent: correct
+- Multiple mixed-type Constants (`Float64`, `Symbol`, `NamedTuple`) together: correct
+- `Cache{Vector{Float64}}` with Mooncake: works for write-then-read pattern
+- Hessian with `Constant` (scalar and NamedTuple): correct
+
+### Linear Algebra Function Gradients - All Passed
+For ForwardDiff and ReverseDiff:
+- `gradient(X -> sum(X*X'), X)`: correct
+- `gradient(X -> det(X), X)`: correct (matches Jacobi formula)
+- `gradient(X -> tr(X*X*X), X)`: correct
+- `gradient(X -> logdet(X), X)`: correct
+- `gradient(x -> x'*A*x, x)`: correct (`(A+A')x`)
+- `gradient(x -> sum(A\x), x)`: correct
+- `gradient(x -> norm(x), x)`: correct
+- Known FD limitations: `opnorm` (svdvals!), `tr(exp(X))` (exp!) error loudly — same as native FD
+
+## 2026-05-20 (later)
+
+### Same-Point Prep Edge Cases — All Documented Behavior, No Bugs Filed
+
+Tested the user-suggested high-yield staleness scenarios. The docstring contract
+("`other_x` must be _equal_ to `x`", "any element of `other_contexts` with type
+`Constant`...must be _equal_ to the corresponding element of `contexts`") is documented
+in `docs/src/explanation/operators.md`. All observed behavior conforms to that contract.
+
+**Findings (none filed — all documented):**
+
+1. **Same-point prep called at wrong point** (ForwardDiff, Mooncake, Zygote, ChainRules,
+   Tracker, Enzyme): For backends with a default fallback (FD, Mooncake), same-point prep
+   has no special caching — call at different x just works. For backends that actually
+   cache (Zygote, ChainRules, Tracker), the cached `y` and `pb` closure are returned
+   regardless of the passed `x` — silent stale value. Documented as user error.
+
+2. **`value_and_pullback` + same-point prep + in-place mutation of x** (Zygote, ChainRules):
+   Returns internally inconsistent `(y, tx)`:
+   - `y` is a frozen snapshot from prep time → stale
+   - `pb` is a closure that captures `x` by reference → refreshes when called
+   - Result: `y` describes f at original `x`, `tx` describes f at mutated `x`.
+   Tracker returns consistent (both stale because pb closure captures by value).
+   Still documented as contract violation; not filing.
+
+3. **Same-point prep + changing Constant** (Zygote): `check_prep` validates types but not
+   values; Constants are baked into the cached closure → calling with new Constant value
+   silently returns stale gradient. Conforms to documented contract.
+
+4. **`prepare_pullback_same_point` with different cotangent**: Works correctly across
+   ForwardDiff, Zygote, Enzyme (Reverse, default), Mooncake reverse/forward, ChainRules.
+   Cotangent is not baked into the cache.
+
+5. **`prepare_hvp_same_point` with different `v`**: Works correctly across ForwardDiff,
+   SecondOrder(FD,Zygote), Enzyme (Reverse/default), SecondOrder(MooncakeForward,*).
+
+### Stateful Closures (counter Ref) — Documented Limitations Confirmed
+| Backend | Per-call counter increment | Gradient per call |
+|---|---|---|
+| ForwardDiff | ✓ | matches counter |
+| Zygote | ✓ | matches counter |
+| ReverseDiff(compile=false) | ✓ | matches counter |
+| ReverseDiff(compile=true) | ✗ (frozen at 1) | matches frozen counter |
+| Enzyme (all modes) | ✓ | matches counter |
+| Mooncake (reverse) | ✗ (frozen at 0) | matches counter=1 — side-effect not propagated to user-visible Ref |
+| Native Mooncake API | same as DI Mooncake | confirmed upstream |
+
+Mooncake's not propagating closure side effects to user-visible Refs matches the native
+API exactly; documented Mooncake design (tape-based, pure-function view), not a DI bug.
+
+### Other Targeted Tests — All Passed
+- **Third-order derivatives** via nested `derivative` / `second_derivative` (FD, FD/Zy
+  mix): match analytic to machine precision. `AutoZygote` triple-nested errors with
+  Zygote.CompileError (Zygote internal, not DI).
+- **Edge dimensions**: 1×1, 1×N, M×1, 2×3 matrix-output jacobians — all correct for FD
+  and Zygote.
+- **Buffer aliasing**: `gradient!(f, x, backend, x)` (output buffer === input) works for
+  FD and Zygote. `value_and_gradient!` with aliasing: y and g both correct (y is computed
+  before g overwrites x). Aliasing g_buf and hv_buf in `gradient_and_hvp!`: last write
+  wins (user error, but silent).
+- **Hessian into structured matrix buffer**: `Diagonal`/`Symmetric` error with Julia's
+  native restrictions on `setindex!`; not a DI issue. `SparseMatrixCSC` with insufficient
+  pre-allocated entries: expands gracefully.
+- **`prepare!_gradient/jacobian/hessian/hvp`** for resize 3→5: works for FD. Type-change
+  blocked by `PreparationMismatchError` (documented).
+- **`Cache` size**: oversized cache works (function uses only prefix); too-small cache
+  errors at function level; cache contents from previous run don't affect correctness
+  (function overwrites).
+- **Odd patterns**: global matrices, kwargs, default args evaluated from `x`,
+  view-returning functions — all correct for FD/Zygote.
+- **`value_gradient_and_hessian` consistency**: matches separate `value_and_gradient` +
+  `hessian` for FD, SecondOrder(FD,FD), SecondOrder(FD,Zygote), AutoSparse(FD),
+  AutoSparse(SecondOrder(FD,FD)). In-place variant matches out-of-place.
+- **`gradient_and_hvp` Enzyme**: AutoEnzyme(default/Reverse) match separate calls and
+  analytic answer. AutoEnzyme(Forward) errors on `hvp` (forward-over-forward limitation).
+
+### Design-Constraint Errors Confirmed (Not Bugs)
+- `SecondOrder` and `AutoSparse` raise `ArgumentError: Pullback performance not defined`
+  when used with `gradient`/`pullback`/`value_and_pullback`. Intentional per
+  `src/utils/traits.jl:78,111`. Error message is uninformative but the design is clear.
+  Not filing (enhancement, not bug).
+
+### Summary
+No new bugs filed today. Open issues remain at #1009–#1018. All same-point prep
+behaviors conform to the documented contract in `docs/src/explanation/operators.md`.
+The Zygote/ChainRules "stale-y, refreshed-tx" inconsistency is a subtle footgun under
+contract violation, but stays within documented undefined-behavior territory.
+
+### Backends to Skip
+- **Diffractor**: unmaintained, recent releases broke the DI integration
+  (see `docs/src/explanation/backends.md`). Do not include `AutoDiffractor` in any
+  cross-backend test matrix; do not file bugs against it.
+
 ### To Test Next
-- Diffractor (forward-mode, less mature than ForwardDiff)
-- GTPSA (TPSA-based backend)
 - GPU array scenarios (if environment supports — blocked locally)
-- ForwardDiff native (currently blocked by libquadmath.so.0 missing)
-- More on `AutoSparse(...)` — see if FastDifferentiation #1014 also leaks into other sparse-backend combinations
+- Type stability `@inferred` checks across operators
+- Threading interactions (multiple preps, concurrent reads)
+- `DifferentiateWith` chained with prep reuse
+- Higher-order ops where Mooncake's side-effect masking might silently break user code

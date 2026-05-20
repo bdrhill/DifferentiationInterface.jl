@@ -46,6 +46,9 @@ Test DifferentiationInterface operators against reference implementations and cr
       - Symbolic backends: Slow preparation
       - Thread safety: Concurrent `prep` usage (user error)
       - Complex numbers: Non-holomorphic functions
+   f. **Do NOT test Diffractor.** It is currently unmaintained — recent releases broke
+      the DI integration (see `docs/src/explanation/backends.md`'s Diffractor section).
+      Skip `AutoDiffractor` in any cross-backend test matrix; do not file Diffractor bugs.
 5. Continue testing other edge cases after filing
 
 ## Priority Test Areas
