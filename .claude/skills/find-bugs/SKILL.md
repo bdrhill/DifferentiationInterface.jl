@@ -8,6 +8,8 @@ allowed-tools: Bash(julia --project *) Bash(gh issue *)
 
 Test DifferentiationInterface operators against reference implementations and cross-validate between backends.
 
+`LOG.md` (next to this file) records what previous sessions tested, what passed, what was filed, and what's left untested. Read it before starting to avoid re-testing covered ground, and append a section at the end of the session with the date, what you tested, and what you filed.
+
 ## Workflow
 
 1. **First**, check open issues: `gh issue list --state open`
