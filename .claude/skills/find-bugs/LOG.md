@@ -836,7 +836,326 @@ contract violation, but stays within documented undefined-behavior territory.
 
 ### To Test Next
 - GPU array scenarios (if environment supports — blocked locally)
-- Type stability `@inferred` checks across operators
-- Threading interactions (multiple preps, concurrent reads)
-- `DifferentiateWith` chained with prep reuse
-- Higher-order ops where Mooncake's side-effect masking might silently break user code
+
+## 2026-05-21
+
+### Type Stability (`@inferred`) Tests
+
+**ForwardDiff:**
+- Without prep: `gradient`, `jacobian`, `hessian` are type-unstable (return `Any`)
+- With prep: all operators type-stable
+- With explicit `chunksize`: all operators type-stable even without prep
+- `derivative`, `pushforward`, `pullback`, `value_and_gradient`: type-stable without prep
+- Root cause: automatic chunksize selection at runtime makes return type depend on input length
+- **Not a bug** — known trade-off between convenience and type stability
+
+**Zygote:**
+- All operators (`gradient`, `jacobian`, `pullback`, `value_and_gradient`, `value_and_pullback`)
+  type-stable both with and without prep
+
+### Threading Tests (Shared Prep)
+
+Tested concurrent calls using shared prep across 4 threads:
+- Separate preps per thread: all correct (expected)
+- Shared prep, different `x` values: 5% wrong results (100 iterations)
+- Shared prep, same `x` value (copied): all correct
+- Shared prep with `gradient!`: 12% wrong results (100 iterations)
+- High contention (1000 iterations): 51% wrong results
+
+**Conclusion:** Confirms documented behavior. Prep objects are not thread-safe; create one per thread.
+Not a bug.
+
+### DifferentiateWith + Prep Reuse Tests - All Passed
+
+- DW wrapper with outer ForwardDiff gradient + prep reuse at different x: correct
+- DW inside jacobian with prep reuse: correct
+- DW hessian (forward-over-FD) + prep reuse: correct
+- Nested DW (DW wrapping DW): works correctly
+- DW with prep reuse + size mismatch: correctly rejected with DimensionMismatch
+
+### HVP Edge Cases - All Passed
+
+- Basic HVP correctness: matches H*v
+- Multiple v values with same prep: all correct, previous results unchanged
+- Prep reuse at different x: correct
+- `prepare_hvp_same_point` with different v: works correctly
+- Non-diagonal Hessian: correct
+- Zero vector: returns zeros
+- HVP with Constant context: correct
+
+### Enzyme Edge Cases - All Passed
+
+- Reverse vs Forward mode gradients agree
+- Jacobian with both modes: correct
+- In-place `gradient!`: correct
+- Constant context: works
+- Prep reuse at different points: correct
+- Pushforward/pullback: correct
+- Derivative (scalar): correct
+- Float32: type preserved
+- HVP: correct
+- Empty array: works (returns `Float64[]`)
+- Views (non-contiguous): works
+- Forward hessian: fails as expected (EnzymeRuntimeExceptionMI) — known limitation
+
+### Mathematical Edge Cases - All Passed
+
+- Numerical precision near machine epsilon (1e-15 coefficients): correct
+- Gradient at exact zero (minimum): returns exact zeros
+- Hessian of highly curved function (`exp(sum(x.^2))`): matches analytical
+- Deeply nested chain rule: correct
+- Rank-deficient Jacobian: correct
+- `value_gradient_and_hessian` consistency: all components match separate calls
+- Pushforward with orthogonal basis vectors: correct
+- HVP symmetry (`<u,Hv> = <v,Hu>`): holds
+- High dimensional (n=100): correct
+- Near-singular Jacobian (1e-10 entry): correct
+
+### Mooncake Side-Effect Edge Cases - All Passed (Known Limitations Confirmed)
+
+- Counter in closure: counter not incremented (Mooncake limitation), gradients still correct
+- Global variable read (no mutation): correct
+- View-returning function: correct
+- Forward vs Reverse mode: agree
+- Jacobian both modes: correct
+- Prep reuse with side-effecting function: counter not incremented, gradients correct
+- Nested closures: correct
+- Prep reuse at different x: correct, previous result unchanged
+- Constant context: correct
+- Float32: type preserved
+- Empty array: works
+- Constant-output function: returns zeros correctly
+
+**Summary:** Mooncake's side-effect masking (Ref increments not propagating) is a known
+limitation documented in the native API. Gradients remain correct. No silent breakage found.
+
+### Summary of Session
+No new bugs filed. All tested areas showed expected behavior:
+- Type stability trade-off in ForwardDiff is by design
+- Thread safety limitations are documented
+- DifferentiateWith + prep reuse works correctly
+- All mathematical edge cases pass
+- Mooncake side-effect masking doesn't affect gradient correctness
+
+### Exotic Input Types (NamedTuples, Structs, Tuples) - No Bugs
+
+**FiniteDifferences:** Handles all exotic types naturally via perturbation approach
+- NamedTuple: ✓ returns NamedTuple gradient
+- Tuple: ✓ returns Tuple gradient
+- Mutable struct: ✓ returns struct gradient
+- Immutable struct: ✓ returns struct gradient
+- Nested NamedTuple: ✓
+
+**Zygote:** Handles all exotic types
+- NamedTuple, Tuple: ✓ returns same type
+- Structs (mutable/immutable): ✓ returns NamedTuple (Zygote convention)
+
+**ForwardDiff:** MethodError for all non-array types (expected - requires Dual number support)
+
+### AutoSparse + Prep Reuse - All Passed
+
+- Sparse Jacobian prep reuse at different x: correct, previous unchanged
+- Sparse Hessian prep reuse at different x: correct, previous unchanged
+- Prep at zero, call at non-zero: correct
+- 20-iteration stress test: all correct
+- Sparse with Constant context: correct with different c values
+- SecondOrder + AutoSparse: correct
+
+### value_and_* and In-Place Operators - All Passed
+
+- `value_and_gradient` vs separate calls: match
+- `value_and_gradient!`: correct
+- `value_and_jacobian` and `value_and_jacobian!`: correct
+- `value_gradient_and_hessian` and `value_gradient_and_hessian!`: correct
+- In-place operators (`gradient!`, `jacobian!`, `hessian!`) with prep reuse: correct, previous unchanged
+- Reusing same buffer for multiple calls: properly overwrites
+- `value_and_gradient` with Constant: correct
+
+### Combined Operators - All Passed
+
+- `gradient_and_hvp` consistency: matches separate calls
+- `gradient_and_hvp!` with tuple buffer: correct
+- `value_and_derivative`: correct
+- `value_derivative_and_second_derivative`: correct
+- Edge dimensions (1x1, 1xN, Mx1 jacobians): all correct
+- Scalar input to gradient: correctly errors (DimensionMismatch)
+- Vector output to gradient: correctly errors (DimensionMismatch)
+- `derivative` with vector output: correct
+- `second_derivative` with vector output: correct
+
+### ReverseDiff Edge Cases - All Passed (Known Limitations Confirmed)
+
+- Basic gradient: `compile=false` and `compile=true` both correct
+- Prep reuse with `compile=true`: correct
+- Control flow with `compile=true`: wrong result when branch changes (documented limitation)
+- Jacobian, Hessian: correct
+- Constant context: correct
+- Float32 precision: preserved
+- Empty array: works
+- `value_and_gradient`: correct
+- In-place jacobian: correct
+
+### Pullback/Pushforward Edge Cases - All Passed
+
+- Pullback with multi-output function: correct (gives gradient of selected output)
+- Pullback with different cotangents: matches Jacobian rows
+- Pushforward with different tangents: matches Jacobian columns
+- Pullback prep reuse with different cotangents: correct
+- Pushforward/pullback duality: holds
+- `value_and_pullback`: correct
+- Pullback with zero cotangent: returns zeros
+- Pullback of scalar function: matches gradient
+- Pushforward with scalar input: correct
+- Pushforward through view-returning function: correct
+
+### Unusual Function Patterns - All Passed
+
+- Reduction over broadcast (`sum(sin.(x) .* cos.(x))`): correct
+- Function with `norm`: correct
+- Function with `dot` product: correct
+- Function with matrix-vector product: correct
+- Function with `vcat`: correct
+- Function with `reshape`: correct
+- Function with `repeat`: correct
+- Jacobian with `selectdim`: correct
+- Function with `accumulate`: correct
+- Function with `maximum` (non-smooth): correct subgradient
+- Jacobian with `permutedims`: correct
+- Very deep composition: finite values
+
+### Cross-Backend Comparisons - All Passed
+
+- ForwardDiff vs Zygote gradient: match
+- ForwardDiff vs Zygote jacobian: match
+- SecondOrder(FD, FD) vs SecondOrder(FD, Zy) hessian: match
+- Complex function with multiple operations: match
+
+### Batched Tangents - All Passed
+
+- Batched pushforward (multiple dx): returns tuple, each matches Jacobian column
+- Batched pullback (multiple dy): returns tuple, each matches Jacobian row
+- Extreme values (1e-100, 1e100): correct
+- Hessian symmetry for non-separable function: holds
+- Prep vs no-prep results: match
+
+### prepare!_* Resizing - Works Correctly (Documentation Clarified)
+
+The `prepare!_*` functions return a new prep object; the `!` indicates MAY mutate (not guaranteed).
+Correct usage: `prep = prepare!_gradient(f, prep, backend, new_x)` (must use return value).
+
+- Resize smaller→larger: correct when using return value
+- Resize larger→smaller: correct when using return value
+- Multiple resizes: all correct
+- Type change: rejected with error
+
+### AutoSparse(MixedMode) - All Passed
+
+`MixedMode` is designed for use inside `AutoSparse`, not standalone (documented).
+
+- Bordered matrix pattern: correct
+- Tridiagonal pattern: correct  
+- Prep reuse at different x: correct, previous unchanged
+- Tall jacobian (6x2): correct
+- Wide jacobian (2x5): correct
+- With Constant context: correct
+
+### Closure and Multiple Context Tests - All Passed
+
+- Large captured array (1000 elements): correct
+- Mutable captured array (value at call time): correct
+- Multiple Constant contexts (3 Constants): correct
+- Constant array context: correct
+- Constant matrix context: correct
+- Nested closures: correct
+- Closure factory pattern: correct
+- Prep reuse with different Constant values: correct
+- Hessian with Constant: correct
+- Jacobian with multiple Constants: correct
+- Cache context with explicit mutation: correct
+- Constant + Cache combined: correct
+
+### Tracker Backend - Mostly Passed
+
+- Basic gradient, jacobian, pullback: all correct
+- Prep reuse at different x: correct, previous unchanged
+- Constant context: correct
+- Float32: type preserved
+- Empty array: works
+- value_and_gradient: correct
+- Hessian: correctly fails (reverse-only)
+- Pullback duality: correct
+- **Constant function gradient**: returns `nothing` instead of zeros (related to #1011)
+  - `pullback` correctly returns zeros
+  - `derivative` correctly returns 0.0
+  - Only `gradient` returns `nothing`
+  - Added comment to #1011
+
+### Numerical Edge Cases - All Passed
+
+- Catastrophic cancellation: very small error (~6e-9 relative)
+- Very steep gradient (exp(100x)): correct
+- Near-zero denominator: finite values (handles gracefully)
+- Long product chain (50 elements): max relative error 2.3e-15
+- Trigonometric at exact special values: exact match
+- Log near 1: correct
+- Very small differences (1e-14): correct
+- Overflow in intermediate (log(exp(500))): correct, finite
+- Underflow scenario (1e-300): correct
+- Mixed scale Hessian (1e10 and 1e-10): correct
+
+### Summary of 2026-05-21 Session
+
+No new bugs filed. Comprehensive testing covered:
+- Type stability (known trade-off in ForwardDiff)
+- Threading (documented limitation)
+- DifferentiateWith + prep reuse
+- HVP, Enzyme, Mooncake edge cases
+- Mathematical edge cases
+- Exotic input types (NamedTuple, Tuple, structs)
+- AutoSparse + prep reuse
+- AutoSparse(MixedMode) 
+- All value_and_* and in-place operators
+- Combined operators (gradient_and_hvp, etc.)
+- ReverseDiff edge cases (compile=true control flow documented)
+- Pullback/pushforward edge cases
+- Unusual function patterns (norm, dot, reshape, accumulate, maximum, vcat, repeat)
+- Cross-backend comparisons (ForwardDiff vs Zygote)
+- Batched tangents
+- prepare!_* resizing
+- Closures (large captures, mutable captures, nested, factory pattern)
+- Multiple context combinations (Constant + Cache, multiple Constants)
+- Numerical edge cases (catastrophic cancellation, overflow, underflow, mixed scales)
+- Tracker backend (constant function gradient returns `nothing` - added comment to #1011)
+- Complex numbers (confirmed #1009 behavior - ForwardDiff returns `Complex{Dual}`)
+- Type edge cases: Integer, Rational, BigFloat all work correctly
+
+All observed behaviors are either correct or documented limitations.
+
+### To Test Next
+- GPU array scenarios (if environment supports — blocked locally)
+
+## 2026-05-21 (Session 2)
+
+### Investigation: Type Instability in ForwardDiff Extension
+
+Investigated comment on #1020 about type instability in DI. wsmoses noted "the code is unquestionably type unstable in DI" and provided a `code_typed` demonstration.
+
+**Findings:**
+
+1. **Root cause**: When using `AutoForwardDiff()` without explicit chunksize, ForwardDiff's `pickchunksize` determines chunksize at runtime. This makes `Chunk`, `JacobianConfig`, and `ForwardDiffTwoArgJacobianPrep` types have unresolved type parameters.
+
+2. **The `dual_type` function**: `dual_type(config::JacobianConfig{T, V, N}) where {T, V, N}` pattern-matches on type parameters, requiring `Core._compute_sparams` at runtime when parameters aren't known at compile time.
+
+3. **Performance impact** (after warmup):
+   - Without explicit chunksize: ~4KB allocations, 7-10 μs
+   - With explicit chunksize: ~3KB allocations, 0.4-3 μs
+   - ~33% more allocations and measurably slower
+
+4. **Distinction from #1020**: Issue #1020 was about `_compute_sparams` causing Enzyme to fail. The type instability itself is a separate (related) issue affecting performance.
+
+5. **Workaround**: Users can specify explicit chunksize for type stability:
+   ```julia
+   prepare_jacobian(f!, y, AutoForwardDiff(; chunksize=N), x)
+   ```
+
+**Filed then closed:** #1021 - duplicate of #534. The type instability with automatic chunksize was already known and addressed by PR #539 (for explicit chunksize). Added comment to #1020 noting the workaround.
